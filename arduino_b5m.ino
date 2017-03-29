@@ -32,7 +32,6 @@
 ///////////////////////////////////////////////////////////////////////////////////////
 //////////////////// Agrego las librerias necesarias
 ///////////////////////////////////////////////////////////////////////////////////////
-#include <stdlib.h> // Usar strtol(string, &garbage, base[0-autodetect])
 #include <Servo.h>
 
 ///////////////////////////////////////////////////////////////////////////////////////
@@ -53,8 +52,8 @@
 #define PIN_SERVOS {4,5,6,7,8}
 
 #define POSICIONES_INICIALES {90,90,90,90,90}
-#define POSICION_MAXIMA 200
-#define POSICION_MINIMA 30
+#define POSICION_MAXIMA 180
+#define POSICION_MINIMA 0
 #define DESPLAZAMIENTO_MAXIMO 8
 
 // -- Constantes asociadas al grabado de secuencia
