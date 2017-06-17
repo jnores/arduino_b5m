@@ -23,16 +23,20 @@
                 por ahora se acosia en una funcion disparadora.
         SKIP    2. Modificar el codigo para que efectue una secuencia pregrabada.
         DONE    3. Agregar la posibilidad de recibir la secuencia de acciones por USB
-        4. Generar acciones a partir de Joystick PS2.
-        5. Generar acciones a partir de potenciometros y botones.
+        --- 4. Generar acciones a partir de Joystick PS2. ---
+        --- 5. Generar acciones a partir de potenciometros y botones. ---
         6. Comprimir el binario para que entre en los 32k del Arduino nano.
-        7. Generar un compresor de codigo para minimizar al maximo el binario.
-        8. Ver como este compresor podria comprimir tambien las librerias.
+        --- 7. Generar un compresor de codigo para minimizar al maximo el binario. ---
+        --- 8. Ver como este compresor podria comprimir tambien las librerias. ---
+        --- 9. Modularizar las acciones de movimiento y grabado/reproduccion de manera
+        independiente. Para esto se debe respetar un diagrama de estados. ---
+        NO ME SALIO 10. Aplicar la logica de estados Iniciando -> Preparado <-> [Grabando/Reproduciendo]
 */
 ///////////////////////////////////////////////////////////////////////////////////////
 //////////////////// Agrego las librerias necesarias
 ///////////////////////////////////////////////////////////////////////////////////////
 #include <Servo.h>
+
 
 ///////////////////////////////////////////////////////////////////////////////////////
 //////////////////// Defino constantes
@@ -69,6 +73,15 @@
 
 #define CANTIDAD_ACCIONES 4
 
+#define ESTADO_PREPARADO 0
+#define ESTADO_GRABANDO 1
+#define ESTADO_REPRODUCIENDO 2
+
+#define CANTIDAD_ESTADOS 3
+
+#define NELEMS(x)  (sizeof(x) / sizeof((x)[0]))
+
+
 ///////////////////////////////////////////////////////////////////////////////////////
 //////////////////// Declaracion de Tipos de datos
 ///////////////////////////////////////////////////////////////////////////////////////
@@ -91,24 +104,33 @@ void accionReproducir(String params[]);
 //////////////////// Declaracion de variables y objetos
 ///////////////////////////////////////////////////////////////////////////////////////
 Servo servos[CANTIDAD_SERVOS];
-ItemAccion acciones[CANTIDAD_ACCIONES];
 
+//ItemAccion** accionesPorEstado[CANTIDAD_ESTADOS];
+ItemAccion accionesDisponibles[CANTIDAD_ACCIONES];
 String comando = "";
 
 short pinServos[] = PIN_SERVOS;
 short posicionServos[] = POSICIONES_INICIALES;
 
+
+
 short secuenciaAutomatica[BUFFER_LENGHT][CANTIDAD_SERVOS];
-bool estaReproduciendo = false;
-bool estaGrabando = false;
 
 short posicionGrabacion = 0;
 short posicionReproduccion = 0;
 short duracionSecuencia = 0;
+// graba y reproduce la posicon cada medio segundo
+unsigned long recordInterval = 500;
+// registra el tiempo de la ultima grabacion/reproduccion para respetar el
+// intervalo configurado.
+unsigned long timeLastRecodrReplay = 0;
 
-///////////////////////////////////////////////////////////////////////////////////////
+
+short estadoActual=-1;
+
+////////////////////////////////////////////////////////////////////////////////
 //////////////////// DEFINICION DE FUNCIONES OBLIGATORIAS
-///////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
 
 /**
         Inicializamos Variables, clases y configuramos librerias
@@ -129,22 +151,26 @@ void setup()
         borrarSecuencia();
         comando.reserve(32);
         delay(500);
+        estadoActual=ESTADO_PREPARADO;
 }
 
 /**
-        Ciclo ifinito de ejecucion.
+        Ciclo infinito de ejecucion.
 */
 void loop()
 {
-        if (estaReproduciendo)
+        serialEvent();
+
+        if (estadoActual == ESTADO_REPRODUCIENDO)
         {
                 reproducirPosicion();
         }
-        else
+        else if(estadoActual == ESTADO_GRABANDO)
         {
-                // leerJoystick();
+                grabarPosicion();
         }
-        serialEvent();
+
+        locateServos();
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////
@@ -160,12 +186,37 @@ void iniciarServos()
         }
 }
 
+void locateServos()
+{
+        for (int i = 0; i < CANTIDAD_SERVOS; i++)
+        {
+                moverServoA(i, posicionServos[i] );
+        }
+}
+/**
+ * [iniciarAcciones description]
+ * Aqui se inicializa el arreglo bidimencional de acciones asociado al los cada
+ * estado posible del controlador.
+ */
 void iniciarAcciones()
 {
-        acciones[0] = {ACCION_MOVER, &accionMover};
-        acciones[1] = {ACCION_GRABAR, &accionGrabar};
-        acciones[2] = {ACCION_DETENER, &accionDetener};
-        acciones[3] = {ACCION_REPRODUCIR, &accionReproducir};
+        accionesDisponibles[0] = {ACCION_MOVER, &accionMover};
+        accionesDisponibles[1] = {ACCION_GRABAR, &accionGrabar};
+        accionesDisponibles[2] = {ACCION_REPRODUCIR, &accionReproducir};
+        accionesDisponibles[3] = {ACCION_DETENER, &accionDetener};
+//         ItemAccion* accionesPreparado = new ItemAccion[3];
+//
+//         accionesPreparado[0] = {ACCION_MOVER, &accionMover};
+//         accionesPreparado[1] = {ACCION_GRABAR, &accionGrabar};
+//         accionesPreparado[2] = {ACCION_REPRODUCIR, &accionReproducir};
+//
+//         accionesPorEstado[ESTADO_PREPARADO] = &accionesPreparado;
+
+        // accionesPorEstado[ESTADO_GRABANDO][0] = {ACCION_MOVER, &accionMover};
+        // accionesPorEstado[ESTADO_GRABANDO][1] = {ACCION_DETENER, &accionDetener};
+
+        // accionesPorEstado[ESTADO_REPRODUCIENDO][0] = {ACCION_DETENER, &accionDetener};
+
 }
 
 // -- Funciones de grebacion y reproduccion
@@ -182,38 +233,51 @@ void borrarSecuencia()
 
 void grabarPosicion()
 {
-        Serial.print("# GRABAR POSICION: ");
-        Serial.println(posicionGrabacion);
-        for (int i = 0; i < CANTIDAD_SERVOS; i++)
-                secuenciaAutomatica[posicionGrabacion][i] = posicionServos[i];
+        if (millis() - timeLastRecodrReplay > recordInterval)
+        {
+#ifdef B5M_DEBUG
+                Serial.print("# GRABAR POSICION: ");
+                Serial.println(posicionGrabacion);
+#endif
+                for (int i = 0; i < CANTIDAD_SERVOS; i++)
+                        secuenciaAutomatica[posicionGrabacion][i] = posicionServos[i];
 
-        posicionGrabacion++;
-        if (posicionGrabacion == BUFFER_LENGHT)
-                detenerGrabacion();
+                timeLastRecodrReplay = millis();
+
+                duracionSecuencia = ++posicionGrabacion;
+                if (posicionGrabacion == BUFFER_LENGHT)
+                        detenerGrabacion();
+        }
 }
 
 void reproducirPosicion()
 {
-
-        for (int i = 0; i < CANTIDAD_SERVOS; i++)
-                moverServoA(
-                        i,
-                        secuenciaAutomatica[posicionReproduccion][i]
-                );
-
-        if (posicionReproduccion == 0)
+        if (millis() - timeLastRecodrReplay > recordInterval)
         {
-                delay(300);
-                Serial.println("# ESPERO 300ms para retomar la posicion inicial");
+                for (int i = 0; i < CANTIDAD_SERVOS; i++)
+                        posicionServos[i] = secuenciaAutomatica[posicionReproduccion][i];
+
+                timeLastRecodrReplay = millis();
+
+                posicionReproduccion++;
+                if (posicionReproduccion == duracionSecuencia)
+                        detenerReproduccion();
+
         }
-
-
-        posicionReproduccion++;
-        if (posicionReproduccion == duracionSecuencia)
-                detenerReproduccion();
-
 }
 
+/**
+ * Se enarga de realizar el control del desplazamiento, respetando el
+ * desplazamiento maximo configurado y de verificar los limites de movimiento
+ * del servo.
+ * Devuelve una posicion valida que respete el desplazamiento maximo..
+ *
+ * @param  actual         posicion actual que se desea desplazar.
+ * @param  desplazamiento Se pasa por referencia para poder actualizar el estado
+ * si este exede los limites configurados.
+ * @return                posicion a la que debe desplazarce el servo,
+ * respetando los limites y la distancia de desplazamiento maxima configurada.
+ */
 short calcularPosicion(short actual, short &desplazamiento)
 {
 
@@ -234,100 +298,78 @@ short calcularPosicion(short actual, short &desplazamiento)
 void moverServoA(short servoId, short posicion)
 {
         servos[servoId].write(posicionServos[servoId]);
+        delay(5);
         // LOG ACCION
-        Serial.print("# MOVER SERVO ");
-        Serial.print(servoId);
-        Serial.print(" a ");
-        Serial.println(posicion);
+#ifdef B5M_DEBUG
+        if (millis()%recordInterval == 0 )
+        {
+                Serial.print("# MOVER SERVO ");
+                Serial.print(servoId);
+                Serial.print(" a ");
+                Serial.println(posicion);
+        }
+#endif
 }
 
 void moverServo(short servoId, short desplazamiento)
 {
-        if (estaReproduciendo) return;
-
-        posicionServos[servoId] = calcularPosicion(posicionServos[servoId], desplazamiento);
-
-        moverServoA(servoId, posicionServos[servoId]);
-
-        if (estaGrabando)
-                grabarPosicion();
-
-        // LOG ACCION
-        Serial.print("||");
-        Serial.print(ACCION_MOVER);
-        Serial.print("&2&");
-        Serial.print(servoId);
-        Serial.print("&");
-        Serial.print(desplazamiento);
-        Serial.print("&||");
+        if (estadoActual != ESTADO_REPRODUCIENDO)
+        {
+                posicionServos[servoId] = calcularPosicion(posicionServos[servoId], desplazamiento);
+                moverServoA(servoId, posicionServos[servoId]);
+        }
 }
 
 void iniciarGrabacion()
 {
-
-        if (estaReproduciendo)
-                detenerReproduccion();
-        if (estaGrabando)
-                return;
-        estaGrabando = true;
-
-        // LOG ACCION
-        Serial.print("||");
-        Serial.print(ACCION_GRABAR);
-        Serial.print("&||");
+        if (estadoActual != ESTADO_GRABANDO)
+        {
+                if (estadoActual == ESTADO_REPRODUCIENDO)
+                        detenerReproduccion();
+                estadoActual = ESTADO_GRABANDO;
+        }
 }
 
 void detenerGrabacion()
 {
-        estaGrabando = false;
-        duracionSecuencia = posicionGrabacion;
         posicionGrabacion = 0;
+        estadoActual=ESTADO_PREPARADO;
 
-        // LOG ACCION
-        Serial.print("||");
-        Serial.print(ACCION_DETENER);
-        Serial.print("&||");
 }
 
 void iniciarReproduccion()
 {
-        if (estaGrabando)
-                detenerGrabacion();
-        if (estaReproduciendo)
+        if (estadoActual != ESTADO_REPRODUCIENDO)
         {
-                Serial.print("# YA esta reproduciento. Termino");
-                return;
-        }
-        if (duracionSecuencia == 0)
-        {
-                Serial.print("# No hay una secuencia grabada");
-                return;
+                if (estadoActual == ESTADO_GRABANDO)
+                        detenerGrabacion();
+                estadoActual = ESTADO_REPRODUCIENDO;
         }
 
-        estaReproduciendo = true;
-
-
-
-
-        // LOG ACCION
-        Serial.print("||");
-        Serial.print(ACCION_REPRODUCIR);
-        Serial.print("&||");
 }
 
 void detenerReproduccion()
 {
-        estaReproduciendo = false;
         posicionReproduccion = 0;
+        estadoActual=ESTADO_PREPARADO;
 
-        // LOG ACCION
-        Serial.print("||");
-        Serial.print(ACCION_DETENER);
-        Serial.print("&||");
+}
+
+void detener()
+{
+        switch(estadoActual)
+        {
+        case ESTADO_GRABANDO:
+                detenerGrabacion();
+                break;
+        case ESTADO_REPRODUCIENDO:
+                detenerReproduccion();
+                break;
+        }
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////
-//////////////////// <DEFINICION DE FUNCIONES PROPIAS DE LA COMUNICACION POR USB>
+////////////////// <DEFINICION DE FUNCIONES PROPIAS DE LA COMUNICACION POR USB>
 ///////////////////////////////////////////////////////////////////////////////////////
 /**
         Evento disparado dentro del loop. Pero solo si se recivio algo por RX
@@ -356,7 +398,7 @@ void serialEvent()
 
 }
 /**
-        Procesa el coomando enviado y lo parsea para poder ejecutar la accion solicitada
+        Procesa el comando enviado y lo parsea para poder ejecutar la accion solicitada
         La estructura del comando es:
         ||nombreAccion[&cantidadParametros[&parametro1&parametro2]]
 */
@@ -395,7 +437,21 @@ void procesarComando(String comando)
                 }
         }
 
-        ejecutarAccion(accion, params);
+        if (ejecutarAccion(accion, params))
+        {
+                Serial.println("#Comando Ejecutada:");
+                Serial.print(comando);
+                Serial.println("&||");
+        }
+#ifdef B5M_DEBUG
+        else
+        {
+                Serial.println("");
+                Serial.print("#Comando DESCARTADO: ");
+                Serial.print(comando);
+                Serial.println("&||");
+        }
+#endif
 
         if ( params != NULL )
                 delete[] params;
@@ -405,16 +461,21 @@ void procesarComando(String comando)
         Funcion encargada de ejecutar la funcion asociada a la accion recivida.
         TODO: Esta funcion se debe reemplazar por un map<String, *fp>
 */
-void ejecutarAccion(String accion, String params[] )
+bool ejecutarAccion(String accion, String params[] )
 {
-        for (int i = 0; i < CANTIDAD_ACCIONES; i++)
+    if (NULL != accionesDisponibles)
+    {
+        for (int i = 0; i < NELEMS(accionesDisponibles); i++)
         {
-                if ( accion == acciones[i].accion )
+                if ( accion == accionesDisponibles[i].accion )
                 {
-                        (*acciones[i].funcion)(params);
-                        break;
+                        // (*(*accionesPorEstado[estadoActual])[i].funcion)(params);
+                        (* accionesDisponibles[i].funcion)(params);
+                        return true;
                 }
         }
+    }
+    return false;
 }
 
 // -- DEFINICION DE ACCIONES " @see typedef fnAccion "
@@ -428,7 +489,7 @@ void accionMover(String params[])
         Serial.print(ACCION_MOVER);
         Serial.print(" motor_id(" + params[0] + "): ");
         Serial.print(servoId);
-        Serial.print(" deslazamiento(" + params[1] + "): ");
+        Serial.print(" desplazamiento(" + params[1] + "): ");
         Serial.println(desplazamiento);
 #endif
         moverServo(servoId, desplazamiento);
@@ -461,8 +522,7 @@ void accionDetener(String params[])
         Serial.println(ACCION_DETENER);
 #endif
 
-        detenerGrabacion();
-        detenerReproduccion();
+        detener();
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////
